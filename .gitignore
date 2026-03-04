@@ -1,0 +1,5 @@
+node_modules/
+progress.json
+output.log
+tagger.log
+*.log
