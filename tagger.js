@@ -199,8 +199,15 @@ async function main() {
       progress.processed[filePath] = { status: "success", tags, time: new Date().toISOString() };
       progress.stats.success++;
     } catch (err) {
+      const isQuotaError = err.message.includes("429") || err.message.includes("Resource Exhausted") || err.message.includes("quota");
       console.log(`✗ ${err.message.split("\n")[0]}`);
       log(`[错误] ${filePath}: ${err.message}`);
+      if (isQuotaError) {
+        // 额度耗尽，不记录为 failed，保持待处理状态，明天重跑自动续上
+        log(`[额度耗尽] 停止运行，明天额度刷新后重跑即可续上`);
+        saveProgress(progress);
+        process.exit(0);
+      }
       progress.processed[filePath] = { status: "failed", error: err.message };
       progress.stats.failed++;
     }
