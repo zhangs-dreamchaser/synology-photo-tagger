@@ -4,7 +4,7 @@ Automatically tag photos on Synology NAS using Gemini vision models. JPEG files 
 
 ## What Changed
 
-- Default model is `gemini-2.0-flash`
+- Default model is `gemini-2.5-flash-lite`
 - The script tracks API requests by day and can stop automatically at a daily cap
 - When the daily cap or Gemini quota is reached, the script can wait until the next day and continue from `progress.json`
 - The script can send a daily-limit email through SMTP and optionally fall back to DSM notifications
@@ -52,7 +52,7 @@ GEMINI_API_KEY=your_key PHOTO_DIR=/volume1/photo node tagger.js --limit 10
 | Variable | Default | Description |
 |---|---|---|
 | `GEMINI_API_KEY` | required | Gemini API key |
-| `GEMINI_MODEL` | `gemini-2.0-flash` | Gemini model to use |
+| `GEMINI_MODEL` | `gemini-2.5-flash-lite` | Gemini model to use |
 | `REQUESTS_PER_MINUTE` | `15` | Local pacing limit between requests |
 | `DAILY_REQUEST_CAP` | `1500` | Script-level daily request cap |
 | `WAIT_FOR_NEXT_DAY` | `true` | Sleep until the next day and continue automatically |
@@ -81,14 +81,14 @@ GEMINI_API_KEY=your_key PHOTO_DIR=/volume1/photo node tagger.js --limit 10
 ## Output Example
 
 ```text
-[1/848] /IMG_6015.jpg ... ✓ [gemini-2.0-flash] 聊天, 群聊, 微信, 截图, 界面, 屏幕, 文字
-[2/848] /IMG_6405.JPG ... ✓ [gemini-2.0-flash] 名片, 文字, 信息, 联系人, 邮箱, 电话
-[3/848] /IMG_5794.JPG ... ✓ [gemini-2.0-flash] 户外, 建筑, 运动, 攀岩, 自然, 山景
+[1/848] /IMG_6015.jpg ... ✓ [gemini-2.5-flash-lite] 聊天, 群聊, 微信, 截图, 界面, 屏幕, 文字
+[2/848] /IMG_6405.JPG ... ✓ [gemini-2.5-flash-lite] 名片, 文字, 信息, 联系人, 邮箱, 电话
+[3/848] /IMG_5794.JPG ... ✓ [gemini-2.5-flash-lite] 户外, 建筑, 运动, 攀岩, 自然, 山景
 ```
 
 ## Notes
 
 - If Gemini returns quota exhaustion before the script-level cap is reached, the script also pauses and waits for the next day.
 - SMTP is the reliable path for custom daily-progress emails. DSM 7 custom notifications need a valid notification title key and are treated as an optional fallback.
-- `gemini-2.0-flash` is the configured default here because you explicitly requested it. Check current Google AI Studio limits for your project before relying on the `1500` cap.
+- `gemini-2.5-flash-lite` is the configured default here because `gemini-2.0-flash` was no longer usable on your current Gemini project. Check current Google AI Studio limits for your project before relying on the `1500` cap.
 - Synology Photos indexing can lag slightly behind metadata writes; `synoindex -a <file>` can help force pickup during verification.

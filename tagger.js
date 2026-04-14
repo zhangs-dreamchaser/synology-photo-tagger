@@ -29,7 +29,7 @@ const CONFIG = {
   dailyStateFile: process.env.DAILY_STATE_FILE || DEFAULT_DAILY_STATE_FILE,
   logFile: process.env.LOG_FILE || "./tagger.log",
   requestsPerMinute: parsePositiveInt(process.env.REQUESTS_PER_MINUTE, 15),
-  model: process.env.GEMINI_MODEL || process.env.AI_MODEL || "gemini-2.0-flash",
+  model: process.env.GEMINI_MODEL || process.env.AI_MODEL || "gemini-2.5-flash-lite",
   dailyRequestCap: parseNonNegativeInt(process.env.DAILY_REQUEST_CAP, 1500),
   waitForNextDay: parseBoolean(process.env.WAIT_FOR_NEXT_DAY, true),
   notifyOnDailyLimit: parseBoolean(process.env.NOTIFY_ON_DAILY_LIMIT, true),
