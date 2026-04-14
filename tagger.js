@@ -9,31 +9,41 @@
 
 import { execFileSync } from "child_process";
 import fs from "fs";
+import nodemailer from "nodemailer";
 import os from "os";
 import path from "path";
 
+const DEFAULT_PROGRESS_FILE = process.env.PROGRESS_FILE || "./progress.json";
+const DEFAULT_DAILY_STATE_FILE = defaultDailyStateFile(DEFAULT_PROGRESS_FILE);
+
 const CONFIG = {
-  apiKey: process.env.DASHSCOPE_API_KEY || process.env.ALIYUN_API_KEY || process.env.AI_API_KEY || "",
-  apiEndpoint:
-    process.env.DASHSCOPE_API_ENDPOINT ||
-    process.env.ALIYUN_API_ENDPOINT ||
-    process.env.AI_ENDPOINT ||
-    "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+  apiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.AI_API_KEY || "",
+  apiEndpoint: stripTrailingSlash(
+    process.env.GEMINI_API_ENDPOINT ||
+      process.env.GOOGLE_API_ENDPOINT ||
+      process.env.AI_ENDPOINT ||
+      "https://generativelanguage.googleapis.com/v1beta",
+  ),
   photoDir: process.env.PHOTO_DIR || "/volume1/homes/YOUR_USER/Photos",
-  progressFile: process.env.PROGRESS_FILE || "./progress.json",
+  progressFile: DEFAULT_PROGRESS_FILE,
+  dailyStateFile: process.env.DAILY_STATE_FILE || DEFAULT_DAILY_STATE_FILE,
   logFile: process.env.LOG_FILE || "./tagger.log",
-  requestsPerMinute: 30,
-  primaryModel:
-    process.env.DASHSCOPE_MODEL ||
-    process.env.ALIYUN_MODEL ||
-    process.env.AI_MODEL ||
-    "qwen-vl-plus",
-  secondaryModel:
-    process.env.DASHSCOPE_SECONDARY_MODEL ||
-    process.env.ALIYUN_SECONDARY_MODEL ||
-    process.env.SECONDARY_AI_MODEL ||
-    "qwen-vl-max",
-  enableSecondaryPass: parseBoolean(process.env.ENABLE_SECONDARY_MODEL, true),
+  requestsPerMinute: parsePositiveInt(process.env.REQUESTS_PER_MINUTE, 15),
+  model: process.env.GEMINI_MODEL || process.env.AI_MODEL || "gemini-2.0-flash",
+  dailyRequestCap: parseNonNegativeInt(process.env.DAILY_REQUEST_CAP, 1500),
+  waitForNextDay: parseBoolean(process.env.WAIT_FOR_NEXT_DAY, true),
+  notifyOnDailyLimit: parseBoolean(process.env.NOTIFY_ON_DAILY_LIMIT, true),
+  notifyTarget: process.env.NOTIFY_TARGET || "",
+  notifyBin: process.env.NOTIFY_BIN || "/usr/syno/bin/synodsmnotify",
+  notifyTitleKey: process.env.DSM_NOTIFY_TITLE_KEY || "",
+  alertEmailTo: process.env.ALERT_EMAIL_TO || process.env.NOTIFY_EMAIL_TO || "",
+  alertEmailFrom: process.env.ALERT_EMAIL_FROM || process.env.SMTP_FROM || process.env.SMTP_USER || "",
+  smtpHost: process.env.SMTP_HOST || "",
+  smtpPort: parsePositiveInt(process.env.SMTP_PORT, 465),
+  smtpSecure: parseBoolean(process.env.SMTP_SECURE, true),
+  smtpUser: process.env.SMTP_USER || "",
+  smtpPass: process.env.SMTP_PASS || "",
+  timeZone: process.env.TIME_ZONE || process.env.TZ || "Asia/Shanghai",
   visionMaxEdge: parsePositiveInt(process.env.VISION_MAX_EDGE, 1600),
   visionMaxBytes: parsePositiveInt(process.env.VISION_MAX_BYTES, 900000),
   embedJpegMetadata: parseBoolean(process.env.EMBED_JPEG_METADATA, true),
@@ -44,46 +54,43 @@ const CONFIG = {
 const IMAGE_EXTS = new Set([".jpg", ".jpeg", ".png", ".heic", ".webp"]);
 const RAW_EXTS = new Set([".rw2", ".nef", ".arw", ".cr2", ".cr3", ".orf", ".dng"]);
 const EMBED_EXTS = new Set([".jpg", ".jpeg"]);
-const TEXT_LIKE_TAGS = new Set([
-  "信息",
-  "文字",
-  "文字信息",
-  "聊天",
-  "聊天信息",
-  "群聊",
-  "微信",
-  "文档",
-  "文件",
-  "通知",
-  "海报",
-  "幻灯片",
-  "投影",
-  "表格",
-  "图表",
-  "报表",
-  "菜单",
-  "价格表",
-  "屏幕",
-  "界面",
-  "截图",
-  "显示器",
-  "电脑",
-  "手机",
-  "白板",
-  "课件",
-  "演示",
-  "演讲",
-  "讲解",
-  "教学",
-  "知识分享",
-  "思维模型",
-  "防疫",
-  "消毒",
-]);
+
+const SYSTEM_INSTRUCTION =
+  "你是 Synology Photos 的照片标签助手。只返回一个 JSON 数组，包含 5 到 10 个简短中文关键词，不要输出解释、Markdown 或多余文本。";
+
+const PROMPT = `分析这张照片，用简短的中文关键词描述其内容。
+返回一个 JSON 数组，包含 5-10 个关键词。
+关键词类别包括但不限于：
+- 场景：室内、室外、城市、自然、海边、山景、街道
+- 主体：人物、动物、食物、建筑、风景、植物、车辆
+- 活动：旅行、聚会、运动、日常、工作
+- 风格：夜景、日出、特写、人像
+- 信息：文字、文档、屏幕、界面、通知、表格、海报
+- 如果画面是截图、聊天界面、社交应用或软件界面，优先描述截图本身，例如：截图、聊天、群聊、微信、界面、屏幕、二维码、公告、通知、联系人。
+- 忽略头像、小缩略图、聊天气泡中的配图或列表封面里的次要照片内容，除非它们占据画面主体。
+只返回 JSON 数组，例如：["旅行", "海边", "风景", "自然", "户外"]`;
+
+class DailyRequestLimitError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "DailyRequestLimitError";
+  }
+}
 
 const isDryRun = process.argv.includes("--dry-run");
 const limitArg = process.argv.indexOf("--limit");
 const maxPhotos = limitArg !== -1 ? parseInt(process.argv[limitArg + 1], 10) : Infinity;
+
+let dailyState = null;
+
+function defaultDailyStateFile(progressFile) {
+  const parsed = path.parse(progressFile);
+  return path.join(parsed.dir, `${parsed.name}.daily-state.json`);
+}
+
+function stripTrailingSlash(value) {
+  return String(value || "").replace(/\/+$/, "");
+}
 
 function parseBoolean(value, fallback) {
   if (value == null || value === "") return fallback;
@@ -96,19 +103,112 @@ function parsePositiveInt(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function parseNonNegativeInt(value, fallback) {
+  if (value == null || value === "") return fallback;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function getDatePartsInTimeZone(date = new Date()) {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: CONFIG.timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const parts = formatter.formatToParts(date);
+  return {
+    year: Number.parseInt(parts.find((part) => part.type === "year")?.value || "1970", 10),
+    month: Number.parseInt(parts.find((part) => part.type === "month")?.value || "01", 10),
+    day: Number.parseInt(parts.find((part) => part.type === "day")?.value || "01", 10),
+  };
+}
+
+function getDateKey(date = new Date()) {
+  const parts = getDatePartsInTimeZone(date);
+  return `${parts.year}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`;
+}
+
+function createEmptyDailyState(dateKey = getDateKey()) {
+  return {
+    date: dateKey,
+    requestCount: 0,
+    successCount: 0,
+    failedCount: 0,
+    skippedCount: 0,
+    lastRequestAt: null,
+    lastStopAt: null,
+    lastStopReason: null,
+    lastNotificationDate: null,
+    lastNotificationReason: null,
+    lastNotificationAt: null,
+  };
+}
+
+function ensureDailyStateShape(rawState) {
+  const state = rawState && typeof rawState === "object" ? rawState : {};
+  const currentDate = getDateKey();
+
+  if (state.date !== currentDate) {
+    return createEmptyDailyState(currentDate);
+  }
+
+  return {
+    date: currentDate,
+    requestCount: parseNonNegativeInt(state.requestCount, 0),
+    successCount: parseNonNegativeInt(state.successCount, 0),
+    failedCount: parseNonNegativeInt(state.failedCount, 0),
+    skippedCount: parseNonNegativeInt(state.skippedCount, 0),
+    lastRequestAt: state.lastRequestAt || null,
+    lastStopAt: state.lastStopAt || null,
+    lastStopReason: state.lastStopReason || null,
+    lastNotificationDate: state.lastNotificationDate || null,
+    lastNotificationReason: state.lastNotificationReason || null,
+    lastNotificationAt: state.lastNotificationAt || null,
+  };
+}
+
+function loadDailyState() {
+  try {
+    const rawState = JSON.parse(fs.readFileSync(CONFIG.dailyStateFile, "utf8"));
+    dailyState = ensureDailyStateShape(rawState);
+  } catch {
+    dailyState = createEmptyDailyState();
+  }
+  saveDailyState();
+  return dailyState;
+}
+
+function saveDailyState() {
+  if (!dailyState) return;
+  fs.mkdirSync(path.dirname(CONFIG.dailyStateFile), { recursive: true });
+  fs.writeFileSync(CONFIG.dailyStateFile, JSON.stringify(dailyState, null, 2));
+}
+
+function refreshDailyState() {
+  const normalized = ensureDailyStateShape(dailyState);
+  const rolledOver = !dailyState || dailyState.date !== normalized.date;
+  dailyState = normalized;
+  if (rolledOver) {
+    saveDailyState();
+  }
+  return dailyState;
+}
+
 function isQuotaExceededError(error) {
   const message = String(error?.message || error);
   return (
-    message.includes("429") &&
-    (message.includes("Too Many Requests") ||
-      message.includes("quota") ||
-      message.includes("rate-limit"))
+    message.includes("429") ||
+    message.includes("RESOURCE_EXHAUSTED") ||
+    message.includes("quota") ||
+    message.includes("rate limit") ||
+    message.includes("Too Many Requests")
   );
 }
 
 function ensureConfig() {
   if (!CONFIG.apiKey) {
-    throw new Error("Missing API key. Set DASHSCOPE_API_KEY, ALIYUN_API_KEY, or AI_API_KEY.");
+    throw new Error("Missing API key. Set GEMINI_API_KEY, GOOGLE_API_KEY, or AI_API_KEY.");
   }
   if (!fs.existsSync(CONFIG.photoDir)) {
     throw new Error(`PHOTO_DIR does not exist: ${CONFIG.photoDir}`);
@@ -140,6 +240,13 @@ function saveProgress(progress) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function millisecondsUntilNextDay() {
+  const now = new Date();
+  const next = new Date(now);
+  next.setHours(24, 0, 5, 0);
+  return Math.max(next.getTime() - now.getTime(), 60_000);
 }
 
 function findThumbnail(filePath) {
@@ -248,21 +355,6 @@ function persistTags(filePath, tags) {
   return "sidecar";
 }
 
-const PROMPT = `分析这张照片，用简短的中文关键词描述其内容。
-返回一个 JSON 数组，包含 5-10 个关键词。
-关键词类别包括但不限于：
-- 场景：室内、室外、城市、自然、海边、山景、街道
-- 主体：人物、动物、食物、建筑、风景、植物、车辆
-- 活动：旅行、聚会、运动、日常、工作
-- 风格：夜景、日出、特写、人像
-- 信息：文字、文档、屏幕、界面、通知、表格、海报
-- 如果画面是截图、聊天界面、社交应用或软件界面，优先描述截图本身，例如：截图、聊天、群聊、微信、界面、屏幕、二维码、公告、通知、联系人。
-- 忽略头像、小缩略图、聊天气泡中的配图或列表封面里的次要照片内容，除非它们占据画面主体。
-只返回 JSON 数组，例如：["旅行", "海边", "风景", "自然", "户外"]`;
-
-const TEXT_FOCUSED_PROMPT = `${PROMPT}
-如果画面包含明显的文字、文档、通知、表格、屏幕、投影、白板、聊天记录、社交界面或演示内容，优先输出这些信息相关关键词。`;
-
 function parseTags(text) {
   const cleaned = String(text || "").trim();
   const match = cleaned.match(/\[[\s\S]*?\]/);
@@ -273,11 +365,13 @@ function parseTags(text) {
     throw new Error(`模型未返回数组: ${cleaned}`);
   }
 
-  const normalized = [...new Set(
-    parsed
-      .map((item) => String(item).trim())
-      .filter(Boolean),
-  )];
+  const normalized = [
+    ...new Set(
+      parsed
+        .map((item) => String(item).trim())
+        .filter(Boolean),
+    ),
+  ];
 
   if (normalized.length === 0) {
     throw new Error("模型未返回有效标签。");
@@ -309,21 +403,34 @@ function preprocessImageForVisionModel(imagePath) {
   try {
     for (const attempt of attempts) {
       try {
-        execFileSync("convert", [
-          imagePath,
-          "-auto-orient",
-          "-resize", `${attempt.edge}x${attempt.edge}>`,
-          "-quality", String(attempt.quality),
-          outputPath,
-        ], { stdio: "ignore" });
+        execFileSync(
+          "convert",
+          [
+            imagePath,
+            "-auto-orient",
+            "-resize",
+            `${attempt.edge}x${attempt.edge}>`,
+            "-quality",
+            String(attempt.quality),
+            outputPath,
+          ],
+          { stdio: "ignore" },
+        );
       } catch {
-        execFileSync("ffmpeg", [
-          "-y",
-          "-i", imagePath,
-          "-vf", `scale='min(${attempt.edge},iw)':'min(${attempt.edge},ih)':force_original_aspect_ratio=decrease`,
-          "-q:v", "4",
-          outputPath,
-        ], { stdio: "ignore" });
+        execFileSync(
+          "ffmpeg",
+          [
+            "-y",
+            "-i",
+            imagePath,
+            "-vf",
+            `scale='min(${attempt.edge},iw)':'min(${attempt.edge},ih)':force_original_aspect_ratio=decrease`,
+            "-q:v",
+            "4",
+            outputPath,
+          ],
+          { stdio: "ignore" },
+        );
       }
 
       const outputBuffer = fs.readFileSync(outputPath);
@@ -340,48 +447,199 @@ function preprocessImageForVisionModel(imagePath) {
   }
 }
 
-function buildPayload(model, mimeType, base64, prompt) {
+function buildPayload(mimeType, base64, prompt) {
   return {
-    model,
-    messages: [
-      {
-        role: "system",
-        content: "你是 Synology Photos 的照片标签助手。只返回一个 JSON 数组，包含 5 到 10 个简短中文关键词，不要输出解释、Markdown 或多余文本。",
-      },
+    systemInstruction: {
+      parts: [{ text: SYSTEM_INSTRUCTION }],
+    },
+    contents: [
       {
         role: "user",
-        content: [
+        parts: [
+          { text: prompt },
           {
-            type: "text",
-            text: prompt,
-          },
-          {
-            type: "image_url",
-            image_url: {
-              url: `data:${mimeType};base64,${base64}`,
+            inlineData: {
+              mimeType,
+              data: base64,
             },
           },
         ],
       },
     ],
-    temperature: 0.2,
-    stream: false,
+    generationConfig: {
+      temperature: 0.2,
+      responseMimeType: "application/json",
+    },
   };
 }
 
-function isTextLikeTagSet(tags) {
-  return tags.some((tag) => TEXT_LIKE_TAGS.has(tag));
+function buildGeminiUrl(model) {
+  return `${CONFIG.apiEndpoint}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(CONFIG.apiKey)}`;
 }
 
-async function requestTags(model, prepared, prompt) {
+function countApiRequest() {
+  const state = refreshDailyState();
+  if (CONFIG.dailyRequestCap > 0 && state.requestCount >= CONFIG.dailyRequestCap) {
+    throw new DailyRequestLimitError(
+      `Daily request cap reached: ${state.requestCount}/${CONFIG.dailyRequestCap} (${state.date})`,
+    );
+  }
+
+  state.requestCount += 1;
+  state.lastRequestAt = new Date().toISOString();
+  saveDailyState();
+}
+
+function updateDailyPhotoStat(status) {
+  const state = refreshDailyState();
+  if (status === "success") state.successCount += 1;
+  if (status === "failed") state.failedCount += 1;
+  if (status === "skipped") state.skippedCount += 1;
+  saveDailyState();
+}
+
+function buildNotificationBody(progress, pendingCount, reason, currentFile) {
+  const state = refreshDailyState();
+  const lines = [
+    `日期: ${state.date}`,
+    `目录: ${CONFIG.photoDir}`,
+    `模型: ${CONFIG.model}`,
+    `原因: ${reason}`,
+    `今日请求数: ${state.requestCount}${CONFIG.dailyRequestCap > 0 ? ` / ${CONFIG.dailyRequestCap}` : ""}`,
+    `今日新增成功: ${state.successCount}`,
+    `今日新增失败: ${state.failedCount}`,
+    `今日新增跳过: ${state.skippedCount}`,
+    `累计成功: ${progress.stats.success}`,
+    `累计失败: ${progress.stats.failed}`,
+    `累计跳过: ${progress.stats.skipped}`,
+    `累计已处理: ${Object.keys(progress.processed).length}`,
+    `当前待处理: ${pendingCount}`,
+  ];
+
+  if (currentFile) {
+    lines.push(`当前文件: ${currentFile}`);
+  }
+
+  if (CONFIG.waitForNextDay) {
+    lines.push("状态: 已暂停，等待下一天自动继续");
+  } else {
+    lines.push("状态: 已停止，需要手动再次启动");
+  }
+
+  return lines.join("\n");
+}
+
+function hasSmtpNotificationConfig() {
+  return Boolean(CONFIG.alertEmailTo && CONFIG.alertEmailFrom && CONFIG.smtpHost);
+}
+
+async function sendSmtpNotification(subject, body) {
+  const transport = nodemailer.createTransport({
+    host: CONFIG.smtpHost,
+    port: CONFIG.smtpPort,
+    secure: CONFIG.smtpSecure,
+    auth:
+      CONFIG.smtpUser || CONFIG.smtpPass
+        ? {
+            user: CONFIG.smtpUser,
+            pass: CONFIG.smtpPass,
+          }
+        : undefined,
+  });
+
+  await transport.sendMail({
+    from: CONFIG.alertEmailFrom,
+    to: CONFIG.alertEmailTo,
+    subject,
+    text: body,
+  });
+}
+
+function sendDsmNotification(subject, body) {
+  if (!CONFIG.notifyTarget || !CONFIG.notifyTitleKey) return false;
+  if (!fs.existsSync(CONFIG.notifyBin)) {
+    log(`[通知] 未找到 DSM 通知命令: ${CONFIG.notifyBin}`);
+    return false;
+  }
+
+  try {
+    execFileSync(CONFIG.notifyBin, [CONFIG.notifyTarget, CONFIG.notifyTitleKey, body], {
+      stdio: "pipe",
+    });
+    log(`[通知] 已通过 DSM 发送到 ${CONFIG.notifyTarget}，标题键 ${CONFIG.notifyTitleKey}`);
+    return true;
+  } catch (error) {
+    const stderr = error?.stderr ? String(error.stderr) : "";
+    log(`[DSM 通知失败] ${stderr || error.message}`);
+    return false;
+  }
+}
+
+async function sendDailyLimitNotification(progress, pendingCount, reason, currentFile) {
+  if (!CONFIG.notifyOnDailyLimit) return;
+  const state = refreshDailyState();
+  if (state.lastNotificationDate === state.date && state.lastNotificationReason === reason) {
+    return;
+  }
+
+  const subject = `Photo Tagger 今日限额停止 (${state.date})`;
+  const body = buildNotificationBody(progress, pendingCount, reason, currentFile);
+  let sent = false;
+
+  try {
+    if (hasSmtpNotificationConfig()) {
+      await sendSmtpNotification(subject, body);
+      log(`[通知] 已发送邮件到 ${CONFIG.alertEmailTo}`);
+      sent = true;
+    } else if (CONFIG.notifyTarget && CONFIG.notifyTitleKey) {
+      sent = sendDsmNotification(subject, body);
+    } else {
+      log("[通知] 未配置 SMTP 或 DSM 自定义通知键，跳过邮件通知。");
+    }
+  } catch (error) {
+    log(`[邮件通知失败] ${error.message}`);
+  }
+
+  if (sent) {
+    state.lastNotificationDate = state.date;
+    state.lastNotificationReason = reason;
+    state.lastNotificationAt = new Date().toISOString();
+    saveDailyState();
+  }
+}
+
+async function pauseUntilNextDay(progress, pendingCount, reason, currentFile) {
+  const state = refreshDailyState();
+  state.lastStopAt = new Date().toISOString();
+  state.lastStopReason = reason;
+  saveDailyState();
+
+  await sendDailyLimitNotification(progress, pendingCount, reason, currentFile);
+
+  if (!CONFIG.waitForNextDay) {
+    return false;
+  }
+
+  const waitMs = millisecondsUntilNextDay();
+  log(`[暂停] ${reason}；将在下一天自动继续，预计等待 ${Math.ceil(waitMs / 60000)} 分钟。`);
+  await sleep(waitMs);
+
+  dailyState = createEmptyDailyState();
+  saveDailyState();
+  log(`[恢复] 已进入 ${dailyState.date}，继续处理剩余照片。`);
+  return true;
+}
+
+async function requestTags(prepared, prompt) {
+  countApiRequest();
+
   const mimeType = prepared.mimeType || "image/jpeg";
   const base64 = prepared.buffer.toString("base64");
-  const payload = buildPayload(model, mimeType, base64, prompt);
+  const payload = buildPayload(mimeType, base64, prompt);
 
-  const response = await fetch(CONFIG.apiEndpoint, {
+  const response = await fetch(buildGeminiUrl(CONFIG.model), {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${CONFIG.apiKey}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify(payload),
@@ -396,67 +654,61 @@ async function requestTags(model, prepared, prompt) {
   }
 
   if (!response.ok) {
-    const message =
-      responseJson?.error?.message ||
-      responseJson?.base_resp?.status_msg ||
-      responseJson?.message ||
-      responseText;
+    const message = responseJson?.error?.message || responseText;
     throw new Error(`API ${response.status}: ${message}`);
   }
 
-  const content = responseJson?.choices?.[0]?.message?.content;
-  const contentText =
-    typeof content === "string"
-      ? content
-      : Array.isArray(content)
-        ? content.map((part) => (typeof part === "string" ? part : part?.text || "")).join("\n")
-        : "";
-
-  if (!contentText) {
-    throw new Error(`Unexpected response format: ${responseText.slice(0, 400)}`);
+  const promptBlockReason = responseJson?.promptFeedback?.blockReason;
+  if (promptBlockReason) {
+    throw new Error(`Prompt blocked: ${promptBlockReason}`);
   }
 
-  return parseTags(contentText);
+  const candidate = responseJson?.candidates?.[0];
+  const parts = candidate?.content?.parts || [];
+  const contentText = parts
+    .map((part) => (typeof part?.text === "string" ? part.text : ""))
+    .join("\n")
+    .trim();
+
+  if (!contentText) {
+    const finishReason = candidate?.finishReason || "UNKNOWN";
+    throw new Error(`Unexpected response format: finishReason=${finishReason}`);
+  }
+
+  return {
+    tags: parseTags(contentText),
+    usage: responseJson?.usageMetadata || null,
+  };
 }
 
 async function analyzePhoto(imagePath) {
   const prepared = preprocessImageForVisionModel(imagePath);
-  const primaryTags = await requestTags(CONFIG.primaryModel, prepared, PROMPT);
-
-  if (
-    !CONFIG.enableSecondaryPass ||
-    !CONFIG.secondaryModel ||
-    CONFIG.secondaryModel === CONFIG.primaryModel ||
-    !isTextLikeTagSet(primaryTags)
-  ) {
-    return { tags: primaryTags, modelUsed: CONFIG.primaryModel };
-  }
-
-  const secondaryTags = await requestTags(CONFIG.secondaryModel, prepared, TEXT_FOCUSED_PROMPT);
-  return {
-    tags: secondaryTags,
-    modelUsed: `${CONFIG.primaryModel}->${CONFIG.secondaryModel}`,
-    primaryTags,
-  };
+  const { tags, usage } = await requestTags(prepared, PROMPT);
+  return { tags, modelUsed: CONFIG.model, usage };
 }
 
 async function main() {
   ensureConfig();
+  loadDailyState();
   log(`=== 开始运行 ${isDryRun ? "[DRY RUN]" : ""} ===`);
+  log(`模型: ${CONFIG.model} | 每分钟限制: ${CONFIG.requestsPerMinute} | 每日请求上限: ${CONFIG.dailyRequestCap || "unlimited"}`);
+  log(`今日日期(${CONFIG.timeZone}): ${dailyState.date} | 今日已用请求: ${dailyState.requestCount}`);
 
   const progress = loadProgress();
   const allPhotos = collectPhotos(CONFIG.photoDir);
-  const pending = allPhotos.filter((filePath) => !progress.processed[filePath]);
+  log(`总照片数: ${allPhotos.length}，已处理: ${Object.keys(progress.processed).length}，待处理: ${allPhotos.length - Object.keys(progress.processed).length}`);
 
-  log(`总照片数: ${allPhotos.length}，已处理: ${Object.keys(progress.processed).length}，待处理: ${pending.length}`);
-
-  const toProcess = pending.slice(0, maxPhotos === Infinity ? pending.length : maxPhotos);
+  const toProcess = allPhotos
+    .filter((filePath) => !progress.processed[filePath])
+    .slice(0, maxPhotos === Infinity ? undefined : maxPhotos);
   log(`本次处理: ${toProcess.length} 张`);
 
   const interval = (60 / CONFIG.requestsPerMinute) * 1000;
   let lastRequestTime = 0;
+  let index = 0;
 
-  for (let index = 0; index < toProcess.length; index += 1) {
+  while (index < toProcess.length) {
+    refreshDailyState();
     const filePath = toProcess[index];
     const ext = path.extname(filePath).toLowerCase();
     const isRaw = RAW_EXTS.has(ext);
@@ -468,7 +720,9 @@ async function main() {
         log(`[跳过] 无缩略图: ${filePath}`);
         progress.processed[filePath] = { status: "skipped", reason: "no_thumbnail" };
         progress.stats.skipped += 1;
+        updateDailyPhotoStat("skipped");
         saveProgress(progress);
+        index += 1;
         continue;
       }
       analyzeTarget = thumb;
@@ -482,49 +736,60 @@ async function main() {
 
     try {
       lastRequestTime = Date.now();
-      const { tags, modelUsed, primaryTags } = await analyzePhoto(analyzeTarget);
+      const { tags, modelUsed, usage } = await analyzePhoto(analyzeTarget);
 
       let writeMode = "dry-run";
       if (!isDryRun) {
         writeMode = persistTags(filePath, tags);
       }
 
-      const modelNote = primaryTags ? ` [${modelUsed}]` : ` [${modelUsed}]`;
-      console.log(`✓${modelNote} ${tags.join(", ")}`);
+      console.log(`✓ [${modelUsed}] ${tags.join(", ")}`);
       progress.processed[filePath] = {
         status: "success",
         tags,
-        primaryTags,
         modelUsed,
+        usage,
         writeMode,
         time: new Date().toISOString(),
       };
       progress.stats.success += 1;
+      updateDailyPhotoStat("success");
+      index += 1;
     } catch (error) {
       const message = String(error.message || error);
-      console.log(`✗ ${message.split("\n")[0]}`);
-      log(`[错误] ${filePath}: ${message}`);
 
-      if (isQuotaExceededError(error)) {
-        log("[停止] API 配额已耗尽，本轮停止，未处理文件保持待处理状态。");
+      if (error instanceof DailyRequestLimitError || isQuotaExceededError(error)) {
+        console.log(`… ${message.split("\n")[0]}`);
         saveProgress(progress);
-        break;
+        const shouldContinue = await pauseUntilNextDay(
+          progress,
+          toProcess.length - index,
+          error instanceof DailyRequestLimitError ? "达到脚本每日请求上限" : "Gemini API 当日配额已耗尽",
+          filePath,
+        );
+        if (!shouldContinue) break;
+        continue;
       }
 
+      console.log(`✗ ${message.split("\n")[0]}`);
+      log(`[错误] ${filePath}: ${message}`);
       progress.processed[filePath] = {
         status: "failed",
         error: message,
       };
       progress.stats.failed += 1;
+      updateDailyPhotoStat("failed");
+      index += 1;
     }
 
-    if ((index + 1) % 100 === 0) {
+    if (index % 100 === 0) {
       saveProgress(progress);
-      log(`进度: ${index + 1}/${toProcess.length} | 成功:${progress.stats.success} 失败:${progress.stats.failed} 跳过:${progress.stats.skipped}`);
+      log(`进度: ${index}/${toProcess.length} | 成功:${progress.stats.success} 失败:${progress.stats.failed} 跳过:${progress.stats.skipped}`);
     }
   }
 
   saveProgress(progress);
+  saveDailyState();
   log(`=== 完成 === 成功:${progress.stats.success} 失败:${progress.stats.failed} 跳过:${progress.stats.skipped}`);
 }
 
