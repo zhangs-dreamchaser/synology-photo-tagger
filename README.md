@@ -39,13 +39,13 @@ npm run check
 
 ```bash
 # Normal run
-GEMINI_API_KEYS="key1,key2,key3" PHOTO_DIR=/volume1/photo node tagger.js
+GEMINI_API_KEYS="<your_keys>" PHOTO_DIR=/volume1/photo node tagger.js
 
 # Dry run
-GEMINI_API_KEYS="key1,key2,key3" PHOTO_DIR=/volume1/photo node tagger.js --dry-run
+GEMINI_API_KEYS="<your_keys>" PHOTO_DIR=/volume1/photo node tagger.js --dry-run
 
 # Test with a small batch first
-GEMINI_API_KEYS="key1,key2,key3" PHOTO_DIR=/volume1/photo node tagger.js --limit 10
+GEMINI_API_KEYS="<your_keys>" PHOTO_DIR=/volume1/photo node tagger.js --limit 10
 ```
 
 ## Environment Variables
