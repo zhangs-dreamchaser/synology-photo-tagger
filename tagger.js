@@ -20,7 +20,7 @@ const CONFIG = {
   progressFile: process.env.PROGRESS_FILE || "./progress.json",
   logFile: process.env.LOG_FILE || "./tagger.log",
   requestsPerMinute: 30,
-  model: "gemini-2.5-flash",
+  model: "gemini-2.0-flash",
 };
 
 const IMAGE_EXTS = new Set([".jpg", ".jpeg", ".png", ".heic", ".webp"]);
