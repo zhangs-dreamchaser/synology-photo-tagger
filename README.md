@@ -6,6 +6,7 @@ Automatically tag photos on Synology NAS using Gemini vision models. JPEG files 
 
 - Default model is `gemini-2.5-flash-lite`
 - The script tracks API requests by day and can stop automatically at a daily cap
+- The script can rotate across multiple Gemini API keys in order
 - When the daily cap or Gemini quota is reached, the script can wait until the next day and continue from `progress.json`
 - The script can send a daily-limit email through SMTP and optionally fall back to DSM notifications
 - JPEG files are embedded in-place by default instead of relying only on sidecar files
@@ -38,23 +39,25 @@ npm run check
 
 ```bash
 # Normal run
-GEMINI_API_KEY=your_key PHOTO_DIR=/volume1/photo node tagger.js
+GEMINI_API_KEYS="key1,key2,key3" PHOTO_DIR=/volume1/photo node tagger.js
 
 # Dry run
-GEMINI_API_KEY=your_key PHOTO_DIR=/volume1/photo node tagger.js --dry-run
+GEMINI_API_KEYS="key1,key2,key3" PHOTO_DIR=/volume1/photo node tagger.js --dry-run
 
 # Test with a small batch first
-GEMINI_API_KEY=your_key PHOTO_DIR=/volume1/photo node tagger.js --limit 10
+GEMINI_API_KEYS="key1,key2,key3" PHOTO_DIR=/volume1/photo node tagger.js --limit 10
 ```
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |---|---|---|
-| `GEMINI_API_KEY` | required | Gemini API key |
+| `GEMINI_API_KEYS` | required | One or more Gemini API keys, separated by commas, spaces, or newlines |
+| `GEMINI_API_KEY` | fallback | Single Gemini API key when `GEMINI_API_KEYS` is not set |
 | `GEMINI_MODEL` | `gemini-2.5-flash-lite` | Gemini model to use |
 | `REQUESTS_PER_MINUTE` | `15` | Local pacing limit between requests |
 | `DAILY_REQUEST_CAP` | `1500` | Script-level daily request cap |
+| `DAILY_REQUEST_CAP_PER_KEY` | `0` | Optional per-key daily cap, mainly useful for testing key rotation |
 | `WAIT_FOR_NEXT_DAY` | `true` | Sleep until the next day and continue automatically |
 | `NOTIFY_ON_DAILY_LIMIT` | `true` | Send an email or DSM notification when the daily cap or provider quota is reached |
 | `ALERT_EMAIL_TO` | empty | Email recipient for daily-limit notifications |
@@ -89,6 +92,7 @@ GEMINI_API_KEY=your_key PHOTO_DIR=/volume1/photo node tagger.js --limit 10
 ## Notes
 
 - If Gemini returns quota exhaustion before the script-level cap is reached, the script also pauses and waits for the next day.
+- When one Gemini key hits quota, the script automatically switches to the next configured key.
 - SMTP is the reliable path for custom daily-progress emails. DSM 7 custom notifications need a valid notification title key and are treated as an optional fallback.
 - `gemini-2.5-flash-lite` is the configured default here because `gemini-2.0-flash` was no longer usable on your current Gemini project. Check current Google AI Studio limits for your project before relying on the `1500` cap.
 - Synology Photos indexing can lag slightly behind metadata writes; `synoindex -a <file>` can help force pickup during verification.

@@ -17,7 +17,15 @@ const DEFAULT_PROGRESS_FILE = process.env.PROGRESS_FILE || "./progress.json";
 const DEFAULT_DAILY_STATE_FILE = defaultDailyStateFile(DEFAULT_PROGRESS_FILE);
 
 const CONFIG = {
-  apiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.AI_API_KEY || "",
+  apiKeys: parseApiKeys(
+    process.env.GEMINI_API_KEYS ||
+      process.env.GOOGLE_API_KEYS ||
+      process.env.AI_API_KEYS ||
+      process.env.GEMINI_API_KEY ||
+      process.env.GOOGLE_API_KEY ||
+      process.env.AI_API_KEY ||
+      "",
+  ),
   apiEndpoint: stripTrailingSlash(
     process.env.GEMINI_API_ENDPOINT ||
       process.env.GOOGLE_API_ENDPOINT ||
@@ -31,6 +39,7 @@ const CONFIG = {
   requestsPerMinute: parsePositiveInt(process.env.REQUESTS_PER_MINUTE, 15),
   model: process.env.GEMINI_MODEL || process.env.AI_MODEL || "gemini-2.5-flash-lite",
   dailyRequestCap: parseNonNegativeInt(process.env.DAILY_REQUEST_CAP, 1500),
+  dailyRequestCapPerKey: parseNonNegativeInt(process.env.DAILY_REQUEST_CAP_PER_KEY, 0),
   waitForNextDay: parseBoolean(process.env.WAIT_FOR_NEXT_DAY, true),
   notifyOnDailyLimit: parseBoolean(process.env.NOTIFY_ON_DAILY_LIMIT, true),
   notifyTarget: process.env.NOTIFY_TARGET || "",
@@ -109,6 +118,23 @@ function parseNonNegativeInt(value, fallback) {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
+function parseApiKeys(value) {
+  return [
+    ...new Set(
+      String(value || "")
+        .split(/[\s,]+/)
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  ];
+}
+
+function getApiKeyLabel(key) {
+  if (!key) return "unknown";
+  if (key.length <= 10) return key;
+  return `${key.slice(0, 6)}...${key.slice(-4)}`;
+}
+
 function getDatePartsInTimeZone(date = new Date()) {
   const formatter = new Intl.DateTimeFormat("en-US", {
     timeZone: CONFIG.timeZone,
@@ -142,6 +168,7 @@ function createEmptyDailyState(dateKey = getDateKey()) {
     lastNotificationDate: null,
     lastNotificationReason: null,
     lastNotificationAt: null,
+    apiKeys: {},
   };
 }
 
@@ -165,7 +192,25 @@ function ensureDailyStateShape(rawState) {
     lastNotificationDate: state.lastNotificationDate || null,
     lastNotificationReason: state.lastNotificationReason || null,
     lastNotificationAt: state.lastNotificationAt || null,
+    apiKeys: normalizeApiKeyState(state.apiKeys),
   };
+}
+
+function normalizeApiKeyState(rawState) {
+  if (!rawState || typeof rawState !== "object") return {};
+
+  return Object.fromEntries(
+    Object.entries(rawState).map(([label, state]) => [
+      label,
+      {
+        requestCount: parseNonNegativeInt(state?.requestCount, 0),
+        exhausted: Boolean(state?.exhausted),
+        exhaustedAt: state?.exhaustedAt || null,
+        lastError: state?.lastError || null,
+        lastRequestAt: state?.lastRequestAt || null,
+      },
+    ]),
+  );
 }
 
 function loadDailyState() {
@@ -201,14 +246,15 @@ function isQuotaExceededError(error) {
     message.includes("429") ||
     message.includes("RESOURCE_EXHAUSTED") ||
     message.includes("quota") ||
+    message.includes("exceeded your current quota") ||
     message.includes("rate limit") ||
     message.includes("Too Many Requests")
   );
 }
 
 function ensureConfig() {
-  if (!CONFIG.apiKey) {
-    throw new Error("Missing API key. Set GEMINI_API_KEY, GOOGLE_API_KEY, or AI_API_KEY.");
+  if (CONFIG.apiKeys.length === 0) {
+    throw new Error("Missing API key. Set GEMINI_API_KEYS, GEMINI_API_KEY, GOOGLE_API_KEYS, GOOGLE_API_KEY, AI_API_KEYS, or AI_API_KEY.");
   }
   if (!fs.existsSync(CONFIG.photoDir)) {
     throw new Error(`PHOTO_DIR does not exist: ${CONFIG.photoDir}`);
@@ -474,10 +520,37 @@ function buildPayload(mimeType, base64, prompt) {
 }
 
 function buildGeminiUrl(model) {
-  return `${CONFIG.apiEndpoint}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(CONFIG.apiKey)}`;
+  return `${CONFIG.apiEndpoint}/models/${encodeURIComponent(model)}:generateContent?key=`;
 }
 
-function countApiRequest() {
+function getApiKeyDayState(label) {
+  const state = refreshDailyState();
+  if (!state.apiKeys[label]) {
+    state.apiKeys[label] = {
+      requestCount: 0,
+      exhausted: false,
+      exhaustedAt: null,
+      lastError: null,
+      lastRequestAt: null,
+    };
+  }
+  return state.apiKeys[label];
+}
+
+function getAvailableApiKeys() {
+  const state = refreshDailyState();
+  return CONFIG.apiKeys.filter((key) => {
+    const keyLabel = getApiKeyLabel(key);
+    const keyState = getApiKeyDayState(keyLabel);
+    if (keyState.exhausted) return false;
+    if (CONFIG.dailyRequestCapPerKey > 0 && keyState.requestCount >= CONFIG.dailyRequestCapPerKey) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function reserveApiKey(key) {
   const state = refreshDailyState();
   if (CONFIG.dailyRequestCap > 0 && state.requestCount >= CONFIG.dailyRequestCap) {
     throw new DailyRequestLimitError(
@@ -485,9 +558,35 @@ function countApiRequest() {
     );
   }
 
+  const keyLabel = getApiKeyLabel(key);
+  const keyState = getApiKeyDayState(keyLabel);
+  if (keyState.exhausted) {
+    throw new DailyRequestLimitError(`Gemini API key exhausted: ${keyLabel}`);
+  }
+  if (CONFIG.dailyRequestCapPerKey > 0 && keyState.requestCount >= CONFIG.dailyRequestCapPerKey) {
+    keyState.exhausted = true;
+    keyState.exhaustedAt = new Date().toISOString();
+    keyState.lastError = `Per-key daily cap reached: ${keyState.requestCount}/${CONFIG.dailyRequestCapPerKey}`;
+    saveDailyState();
+    throw new DailyRequestLimitError(`Gemini API key daily cap reached: ${keyLabel}`);
+  }
+
   state.requestCount += 1;
   state.lastRequestAt = new Date().toISOString();
+  keyState.requestCount += 1;
+  keyState.lastRequestAt = state.lastRequestAt;
   saveDailyState();
+  return keyLabel;
+}
+
+function markApiKeyExhausted(key, errorMessage) {
+  const keyLabel = getApiKeyLabel(key);
+  const keyState = getApiKeyDayState(keyLabel);
+  keyState.exhausted = true;
+  keyState.exhaustedAt = new Date().toISOString();
+  keyState.lastError = errorMessage;
+  saveDailyState();
+  return keyLabel;
 }
 
 function updateDailyPhotoStat(status) {
@@ -500,12 +599,21 @@ function updateDailyPhotoStat(status) {
 
 function buildNotificationBody(progress, pendingCount, reason, currentFile) {
   const state = refreshDailyState();
+  const keySummary = CONFIG.apiKeys
+    .map((key) => {
+      const keyLabel = getApiKeyLabel(key);
+      const keyState = getApiKeyDayState(keyLabel);
+      const suffix = keyState.exhausted ? " exhausted" : " active";
+      return `${keyLabel}: ${keyState.requestCount}${suffix}`;
+    })
+    .join(" | ");
   const lines = [
     `日期: ${state.date}`,
     `目录: ${CONFIG.photoDir}`,
     `模型: ${CONFIG.model}`,
     `原因: ${reason}`,
     `今日请求数: ${state.requestCount}${CONFIG.dailyRequestCap > 0 ? ` / ${CONFIG.dailyRequestCap}` : ""}`,
+    `Key 使用: ${keySummary}`,
     `今日新增成功: ${state.successCount}`,
     `今日新增失败: ${state.failedCount}`,
     `今日新增跳过: ${state.skippedCount}`,
@@ -631,67 +739,83 @@ async function pauseUntilNextDay(progress, pendingCount, reason, currentFile) {
 }
 
 async function requestTags(prepared, prompt) {
-  countApiRequest();
-
   const mimeType = prepared.mimeType || "image/jpeg";
   const base64 = prepared.buffer.toString("base64");
   const payload = buildPayload(mimeType, base64, prompt);
+  let lastQuotaError = null;
 
-  const response = await fetch(buildGeminiUrl(CONFIG.model), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
+  for (const apiKey of getAvailableApiKeys()) {
+    const keyLabel = reserveApiKey(apiKey);
+    const response = await fetch(`${buildGeminiUrl(CONFIG.model)}${encodeURIComponent(apiKey)}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
 
-  const responseText = await response.text();
-  let responseJson;
-  try {
-    responseJson = JSON.parse(responseText);
-  } catch {
-    throw new Error(`Non-JSON response (${response.status}): ${responseText.slice(0, 400)}`);
+    const responseText = await response.text();
+    let responseJson;
+    try {
+      responseJson = JSON.parse(responseText);
+    } catch {
+      throw new Error(`Non-JSON response (${response.status}): ${responseText.slice(0, 400)}`);
+    }
+
+    if (!response.ok) {
+      const message = responseJson?.error?.message || responseText;
+      const error = new Error(`API ${response.status}: ${message}`);
+      if (isQuotaExceededError(error)) {
+        markApiKeyExhausted(apiKey, message);
+        lastQuotaError = `${keyLabel}: ${message}`;
+        log(`[Key 轮换] ${keyLabel} 已耗尽，尝试下一把 key`);
+        continue;
+      }
+      throw error;
+    }
+
+    const promptBlockReason = responseJson?.promptFeedback?.blockReason;
+    if (promptBlockReason) {
+      throw new Error(`Prompt blocked: ${promptBlockReason}`);
+    }
+
+    const candidate = responseJson?.candidates?.[0];
+    const parts = candidate?.content?.parts || [];
+    const contentText = parts
+      .map((part) => (typeof part?.text === "string" ? part.text : ""))
+      .join("\n")
+      .trim();
+
+    if (!contentText) {
+      const finishReason = candidate?.finishReason || "UNKNOWN";
+      throw new Error(`Unexpected response format: finishReason=${finishReason}`);
+    }
+
+    return {
+      tags: parseTags(contentText),
+      usage: responseJson?.usageMetadata || null,
+      apiKeyLabel: keyLabel,
+    };
   }
 
-  if (!response.ok) {
-    const message = responseJson?.error?.message || responseText;
-    throw new Error(`API ${response.status}: ${message}`);
+  if (lastQuotaError) {
+    throw new DailyRequestLimitError(`All configured Gemini API keys exhausted for today. Last error: ${lastQuotaError}`);
   }
 
-  const promptBlockReason = responseJson?.promptFeedback?.blockReason;
-  if (promptBlockReason) {
-    throw new Error(`Prompt blocked: ${promptBlockReason}`);
-  }
-
-  const candidate = responseJson?.candidates?.[0];
-  const parts = candidate?.content?.parts || [];
-  const contentText = parts
-    .map((part) => (typeof part?.text === "string" ? part.text : ""))
-    .join("\n")
-    .trim();
-
-  if (!contentText) {
-    const finishReason = candidate?.finishReason || "UNKNOWN";
-    throw new Error(`Unexpected response format: finishReason=${finishReason}`);
-  }
-
-  return {
-    tags: parseTags(contentText),
-    usage: responseJson?.usageMetadata || null,
-  };
+  throw new DailyRequestLimitError("No Gemini API keys available for today.");
 }
 
 async function analyzePhoto(imagePath) {
   const prepared = preprocessImageForVisionModel(imagePath);
-  const { tags, usage } = await requestTags(prepared, PROMPT);
-  return { tags, modelUsed: CONFIG.model, usage };
+  const { tags, usage, apiKeyLabel } = await requestTags(prepared, PROMPT);
+  return { tags, modelUsed: CONFIG.model, usage, apiKeyLabel };
 }
 
 async function main() {
   ensureConfig();
   loadDailyState();
   log(`=== 开始运行 ${isDryRun ? "[DRY RUN]" : ""} ===`);
-  log(`模型: ${CONFIG.model} | 每分钟限制: ${CONFIG.requestsPerMinute} | 每日请求上限: ${CONFIG.dailyRequestCap || "unlimited"}`);
+  log(`模型: ${CONFIG.model} | key 数量: ${CONFIG.apiKeys.length} | 每分钟限制: ${CONFIG.requestsPerMinute} | 每日请求上限: ${CONFIG.dailyRequestCap || "unlimited"}${CONFIG.dailyRequestCapPerKey ? ` | 单 key 上限: ${CONFIG.dailyRequestCapPerKey}` : ""}`);
   log(`今日日期(${CONFIG.timeZone}): ${dailyState.date} | 今日已用请求: ${dailyState.requestCount}`);
 
   const progress = loadProgress();
@@ -736,18 +860,19 @@ async function main() {
 
     try {
       lastRequestTime = Date.now();
-      const { tags, modelUsed, usage } = await analyzePhoto(analyzeTarget);
+      const { tags, modelUsed, usage, apiKeyLabel } = await analyzePhoto(analyzeTarget);
 
       let writeMode = "dry-run";
       if (!isDryRun) {
         writeMode = persistTags(filePath, tags);
       }
 
-      console.log(`✓ [${modelUsed}] ${tags.join(", ")}`);
+      console.log(`✓ [${modelUsed} ${apiKeyLabel}] ${tags.join(", ")}`);
       progress.processed[filePath] = {
         status: "success",
         tags,
         modelUsed,
+        apiKeyLabel,
         usage,
         writeMode,
         time: new Date().toISOString(),
@@ -761,10 +886,16 @@ async function main() {
       if (error instanceof DailyRequestLimitError || isQuotaExceededError(error)) {
         console.log(`… ${message.split("\n")[0]}`);
         saveProgress(progress);
+        const stopReason =
+          message.includes("All configured Gemini API keys exhausted")
+            ? "所有 Gemini key 当日配额已耗尽"
+            : message.includes("Daily request cap reached")
+              ? "达到脚本每日请求上限"
+              : "Gemini API 当日配额已耗尽";
         const shouldContinue = await pauseUntilNextDay(
           progress,
           toProcess.length - index,
-          error instanceof DailyRequestLimitError ? "达到脚本每日请求上限" : "Gemini API 当日配额已耗尽",
+          stopReason,
           filePath,
         );
         if (!shouldContinue) break;
