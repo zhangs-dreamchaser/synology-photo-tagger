@@ -1,5 +1,9 @@
 node_modules/
+state/
+*.key
 progress.json
+*progress*.json
 output.log
 tagger.log
 *.log
+*.pid

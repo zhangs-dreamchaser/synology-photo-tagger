@@ -1,66 +1,76 @@
 # Synology Photo Tagger
 
-Automatically tag photos on Synology NAS using Google Gemini AI. Generates Chinese keyword tags and writes them as XMP sidecar files, which Synology Photos indexes for search.
+Automatically tag photos on Synology NAS using Qwen vision models. JPEG files are written with embedded XMP/IPTC metadata so Synology Photos can index the tags directly. RAW files and non-JPEG images can still fall back to sidecar XMP.
 
-## How it works
+## What Changed
 
-1. Scans your photo directory recursively
-2. Sends each photo to Gemini 2.5 Flash for analysis
-3. Gets back 5–10 Chinese keywords (scene, subject, activity, style)
-4. Writes a `.xmp` sidecar file next to the photo
-5. Synology Photos picks up the tags automatically — search by "海边", "人物", "旅行", etc.
+- Default model is `qwen-vl-plus`
+- Screenshot, document, screen, and UI-like images can automatically trigger a second pass with `qwen-vl-max`
+- JPEG files are embedded in-place by default instead of relying only on sidecar files
+- Progress, chosen model, and fallback behavior are saved in `progress.json`
 
-RAW files (`.rw2`, `.nef`, `.arw`, etc.) are supported — the script uses Synology's pre-generated thumbnails in `@eaDir` for analysis.
+## How It Works
 
-Progress is saved to `progress.json` so the script can resume if interrupted.
+1. Recursively scans the target photo directory
+2. Uses `qwen-vl-plus` for the first pass
+3. If the first-pass tags suggest text, documents, screenshots, chat UI, or screens, runs a second pass with `qwen-vl-max`
+4. Writes the final Chinese keyword tags into JPEG metadata with `exiv2`
+5. Synology Photos can index the embedded tags for search
+
+RAW files (`.rw2`, `.nef`, `.arw`, `.cr2`, `.cr3`, `.orf`, `.dng`) are supported. The script analyzes Synology-generated thumbnails in `@eaDir`.
 
 ## Requirements
 
 - Node.js 18+
-- Google Gemini API key (free tier: 30 requests/min) — get one at [aistudio.google.com](https://aistudio.google.com)
+- `exiv2` installed on the NAS
+- Alibaba Cloud DashScope / Bailian API key
 
 ## Setup
 
 ```bash
 npm install
+npm run check
 ```
 
 ## Usage
 
 ```bash
-# Run normally
-GEMINI_API_KEY=your_key PHOTO_DIR=/volume1/photos node tagger.js
+# Normal run
+DASHSCOPE_API_KEY=your_key PHOTO_DIR=/volume1/photo node tagger.js
 
-# Dry run — analyze but don't write files
-GEMINI_API_KEY=your_key PHOTO_DIR=/volume1/photos node tagger.js --dry-run
+# Dry run
+DASHSCOPE_API_KEY=your_key PHOTO_DIR=/volume1/photo node tagger.js --dry-run
 
-# Test with 10 photos first
-GEMINI_API_KEY=your_key PHOTO_DIR=/volume1/photos node tagger.js --limit 10
+# Test with a small batch first
+DASHSCOPE_API_KEY=your_key PHOTO_DIR=/volume1/photo node tagger.js --limit 10
 ```
 
-## Environment variables
+## Environment Variables
 
 | Variable | Default | Description |
 |---|---|---|
-| `GEMINI_API_KEY` | required | Your Gemini API key |
+| `DASHSCOPE_API_KEY` | required | DashScope / Bailian API key |
+| `AI_MODEL` | `qwen-vl-plus` | First-pass model |
+| `SECONDARY_AI_MODEL` | `qwen-vl-max` | Second-pass model for text / UI-like images |
+| `ENABLE_SECONDARY_MODEL` | `true` | Enable the second-pass heuristic |
 | `PHOTO_DIR` | `/volume1/homes/YOUR_USER/Photos` | Directory to scan |
 | `PROGRESS_FILE` | `./progress.json` | Where to save progress |
 | `LOG_FILE` | `./tagger.log` | Log file path |
+| `EMBED_JPEG_METADATA` | `true` | Embed tags into JPEG files |
+| `KEEP_JPEG_SIDECAR` | `false` | Keep `.xmp` sidecar after embedding |
+| `VISION_MAX_EDGE` | `1600` | Resize ceiling before upload |
+| `VISION_MAX_BYTES` | `900000` | Size ceiling before upload |
+| `EXIV2_BIN` | `exiv2` | Path to `exiv2` |
 
-## Auto-run on new uploads (cron)
+## Output Example
 
-Add to `/etc/crontab` on your Synology:
-
+```text
+[1/848] /IMG_6015.jpg ... ✓ [qwen-vl-plus->qwen-vl-max] 聊天, 群聊, 微信, 截图, 界面, 屏幕, 文字
+[2/848] /IMG_6405.JPG ... ✓ [qwen-vl-plus->qwen-vl-max] 名片, 文字, 信息, 联系人, 邮箱, 电话
+[3/848] /IMG_5794.JPG ... ✓ [qwen-vl-plus] 户外, 建筑, 运动, 攀岩, 自然, 山景
 ```
-0  3  *  *  *  root  GEMINI_API_KEY=your_key PHOTO_DIR=/volume1/photos node /path/to/tagger.js >> /path/to/output.log 2>&1
-```
 
-Runs every night at 3 AM, skips already-processed photos.
+## Notes
 
-## Output example
-
-```
-[1/13040] /photos/trip/IMG_001.JPG ... ✓ 海边, 礁石, 海浪, 自然, 户外, 风景
-[2/13040] /photos/trip/IMG_002.JPG ... ✓ 人物, 海边, 旅行, 自然, 阴天
-[3/13040] /photos/RAW/P1033707.RW2 ... ✓ 人物, 摄影师, 户外, 自然
-```
+- If the provider returns content-policy errors for specific images, those files are recorded as failed and the rest of the run continues.
+- Synology Photos indexing can lag slightly behind metadata writes; `synoindex -a <file>` can help force pickup during verification.
