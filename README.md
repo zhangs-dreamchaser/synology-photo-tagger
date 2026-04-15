@@ -1,23 +1,23 @@
 # Synology Photo Tagger
 
-Automatically tag photos on Synology NAS using Gemini vision models, with optional Qwen fallback. JPEG files are written with embedded XMP/IPTC metadata so Synology Photos can index the tags directly. RAW files and non-JPEG images can still fall back to sidecar XMP.
+Automatically tag photos on Synology NAS using Qwen vision models, with optional Gemini support when explicitly enabled. JPEG files are written with embedded XMP/IPTC metadata so Synology Photos can index the tags directly. RAW files and non-JPEG images can still fall back to sidecar XMP.
 
 ## What Changed
 
-- Default model is `gemini-2.5-flash-lite`
+- Default provider is `qwen`
+- Default model is `qwen3-vl-flash`
 - The script tracks API requests by day and can stop automatically at a daily cap
-- The script can rotate across multiple Gemini API keys in order
-- If Gemini keys are exhausted, the script can automatically fall back to `qwen3-vl-flash`
+- Gemini support is optional and can be re-enabled with `PRIMARY_PROVIDER=gemini`
 - The script can honor `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`, so only this process needs to go through your OpenWrt proxy
-- When the daily cap or Gemini quota is reached, the script can wait until the next day and continue from `progress.json`
+- When the daily cap is reached, the script can wait until the next day and continue from `progress.json`
 - The script can send a daily-limit email through SMTP and optionally fall back to DSM notifications
 - JPEG files are embedded in-place by default instead of relying only on sidecar files
 
 ## How It Works
 
 1. Recursively scans the target photo directory
-2. Sends each image to Gemini for Chinese keyword tagging
-3. If all Gemini keys are exhausted and Qwen credentials are configured, automatically switches to Qwen
+2. Sends each image to Qwen for Chinese keyword tagging
+3. If you explicitly choose `PRIMARY_PROVIDER=gemini`, the script can use Gemini instead
 4. Writes the final tags into JPEG metadata with `exiv2`
 5. Saves progress continuously so reruns and next-day resumes continue where the previous run stopped
 6. When the daily request cap is reached, pauses and resumes the next day
@@ -28,7 +28,7 @@ RAW files (`.rw2`, `.nef`, `.arw`, `.cr2`, `.cr3`, `.orf`, `.dng`) are supported
 
 - Node.js 18+
 - `exiv2` installed on the NAS
-- Gemini API key
+- Qwen API key
 - If you want email notifications, set SMTP environment variables or provide a DSM notification title key
 
 ## Setup
@@ -42,23 +42,24 @@ npm run check
 
 ```bash
 # Normal run
-GEMINI_API_KEYS="<your_keys>" QWEN_API_KEY="<your_qwen_key>" PHOTO_DIR=/volume1/photo node tagger.js
+QWEN_API_KEY="<your_qwen_key>" PHOTO_DIR=/volume1/photo node tagger.js
 
 # Dry run
-GEMINI_API_KEYS="<your_keys>" QWEN_API_KEY="<your_qwen_key>" PHOTO_DIR=/volume1/photo node tagger.js --dry-run
+QWEN_API_KEY="<your_qwen_key>" PHOTO_DIR=/volume1/photo node tagger.js --dry-run
 
 # Test with a small batch first
-GEMINI_API_KEYS="<your_keys>" QWEN_API_KEY="<your_qwen_key>" PHOTO_DIR=/volume1/photo node tagger.js --limit 10
+QWEN_API_KEY="<your_qwen_key>" PHOTO_DIR=/volume1/photo node tagger.js --limit 10
 ```
 
 ### Run Only This Process Through OpenWrt
 
-If you want Synology DDNS and external access to keep working, restore the NAS default gateway and DNS to your main router, then launch only `photo tagger` with proxy environment variables:
+If you later switch back to Gemini and want Synology DDNS and external access to keep working, restore the NAS default gateway and DNS to your main router, then launch only `photo tagger` with proxy environment variables:
 
 ```bash
 HTTPS_PROXY="http://192.168.1.200:7890" \
 HTTP_PROXY="http://192.168.1.200:7890" \
 NO_PROXY="127.0.0.1,localhost,192.168.1.108,192.168.1.109,192.168.1.200,dashscope.aliyuncs.com" \
+PRIMARY_PROVIDER="gemini" \
 GEMINI_API_KEYS="<your_keys>" \
 QWEN_API_KEY="<your_qwen_key>" \
 PHOTO_DIR=/volume1/photo \
@@ -71,12 +72,13 @@ If your OpenWrt only exposes SOCKS5, use a matching `ALL_PROXY` value instead.
 
 | Variable | Default | Description |
 |---|---|---|
-| `GEMINI_API_KEYS` | required | One or more Gemini API keys, separated by commas, spaces, or newlines |
+| `PRIMARY_PROVIDER` | `qwen` | Primary provider: `qwen` or `gemini` |
+| `QWEN_API_KEY` | required by default | Qwen API key |
+| `QWEN_API_ENDPOINT` | `https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions` | Qwen API endpoint |
+| `QWEN_MODEL` | `qwen3-vl-flash` | Qwen model |
+| `GEMINI_API_KEYS` | optional | One or more Gemini API keys, separated by commas, spaces, or newlines |
 | `GEMINI_API_KEY` | fallback | Single Gemini API key when `GEMINI_API_KEYS` is not set |
 | `GEMINI_MODEL` | `gemini-2.5-flash-lite` | Gemini model to use |
-| `QWEN_API_KEY` | empty | Optional Qwen fallback API key |
-| `QWEN_API_ENDPOINT` | `https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions` | Qwen API endpoint |
-| `QWEN_MODEL` | `qwen3-vl-flash` | Qwen fallback model |
 | `HTTP_PROXY` | empty | Optional per-process HTTP proxy |
 | `HTTPS_PROXY` | empty | Optional per-process HTTPS proxy |
 | `ALL_PROXY` | empty | Optional fallback proxy when `HTTP_PROXY` / `HTTPS_PROXY` are not set |
@@ -110,17 +112,17 @@ If your OpenWrt only exposes SOCKS5, use a matching `ALL_PROXY` value instead.
 ## Output Example
 
 ```text
-[1/848] /IMG_6015.jpg ... ✓ [gemini:gemini-2.5-flash-lite AIzaSy...1234] 聊天, 群聊, 微信, 截图, 界面, 屏幕, 文字
-[2/848] /IMG_6405.JPG ... ✓ [gemini:gemini-2.5-flash-lite AIzaSy...1234] 名片, 文字, 信息, 联系人, 邮箱, 电话
+[1/848] /IMG_6015.jpg ... ✓ [qwen:qwen3-vl-flash dashscope] 聊天, 群聊, 微信, 截图, 界面, 屏幕, 文字
+[2/848] /IMG_6405.JPG ... ✓ [qwen:qwen3-vl-flash dashscope] 名片, 文字, 信息, 联系人, 邮箱, 电话
 [3/848] /IMG_5794.JPG ... ✓ [qwen:qwen3-vl-flash dashscope] 户外, 建筑, 运动, 攀岩, 自然, 山景
 ```
 
 ## Notes
 
-- If Gemini returns quota exhaustion before the script-level cap is reached, the script also pauses and waits for the next day.
-- When one Gemini key hits quota, the script automatically switches to the next configured key.
-- When all Gemini keys are exhausted, the script can keep going with Qwen if `QWEN_API_KEY` is configured.
+- Qwen is now the default path. If you want Gemini again, set `PRIMARY_PROVIDER=gemini`.
+- When Gemini is enabled, the script can rotate across multiple Gemini keys in order.
+- When Gemini is enabled and Qwen credentials are also configured, the script can still fall back to Qwen.
 - Proxy settings apply only to this `node tagger.js` process and its outbound API requests; they do not change the NAS system gateway.
 - SMTP is the reliable path for custom daily-progress emails. DSM 7 custom notifications need a valid notification title key and are treated as an optional fallback.
-- `gemini-2.5-flash-lite` is the configured default here because `gemini-2.0-flash` was no longer usable on your current Gemini project. Check current Google AI Studio limits for your project before relying on the `1500` cap.
+- `qwen3-vl-flash` is the configured default here because your current Gemini path on the NAS depends on proxy authentication and is no longer the primary route.
 - Synology Photos indexing can lag slightly behind metadata writes; `synoindex -a <file>` can help force pickup during verification.

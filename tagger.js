@@ -18,6 +18,9 @@ const DEFAULT_PROGRESS_FILE = process.env.PROGRESS_FILE || "./progress.json";
 const DEFAULT_DAILY_STATE_FILE = defaultDailyStateFile(DEFAULT_PROGRESS_FILE);
 
 const CONFIG = {
+  primaryProvider: String(
+    process.env.PRIMARY_PROVIDER || process.env.AI_PROVIDER || "qwen",
+  ).toLowerCase(),
   apiKeys: parseApiKeys(
     process.env.GEMINI_API_KEYS ||
       process.env.GOOGLE_API_KEYS ||
@@ -314,7 +317,13 @@ function isQuotaExceededError(error) {
 }
 
 function ensureConfig() {
-  if (CONFIG.apiKeys.length === 0 && !CONFIG.qwenApiKey) {
+  if (!["qwen", "gemini"].includes(CONFIG.primaryProvider)) {
+    throw new Error(`Unsupported PRIMARY_PROVIDER: ${CONFIG.primaryProvider}`);
+  }
+  if (CONFIG.primaryProvider === "qwen" && !CONFIG.qwenApiKey) {
+    throw new Error("Missing Qwen credentials. Set QWEN_API_KEY / DASHSCOPE_API_KEY.");
+  }
+  if (CONFIG.primaryProvider === "gemini" && CONFIG.apiKeys.length === 0 && !CONFIG.qwenApiKey) {
     throw new Error("Missing API credentials. Set Gemini keys, or set QWEN_API_KEY / DASHSCOPE_API_KEY for the Qwen fallback.");
   }
   if (!fs.existsSync(CONFIG.photoDir)) {
@@ -584,7 +593,7 @@ function buildGeminiUrl(model) {
   return `${CONFIG.apiEndpoint}/models/${encodeURIComponent(model)}:generateContent?key=`;
 }
 
-function hasQwenFallback() {
+function hasQwenConfigured() {
   return Boolean(CONFIG.qwenApiKey);
 }
 
@@ -675,8 +684,9 @@ function buildNotificationBody(progress, pendingCount, reason, currentFile) {
   const lines = [
     `日期: ${state.date}`,
     `目录: ${CONFIG.photoDir}`,
-    `模型: ${CONFIG.model}`,
-    `Qwen 后备: ${hasQwenFallback() ? CONFIG.qwenModel : "disabled"}`,
+    `主提供商: ${CONFIG.primaryProvider}`,
+    `主模型: ${CONFIG.primaryProvider === "qwen" ? CONFIG.qwenModel : CONFIG.model}`,
+    `Qwen 可用: ${hasQwenConfigured() ? CONFIG.qwenModel : "disabled"}`,
     `原因: ${reason}`,
     `今日请求数: ${state.requestCount}${CONFIG.dailyRequestCap > 0 ? ` / ${CONFIG.dailyRequestCap}` : ""}`,
     `Key 使用: ${keySummary}`,
@@ -884,6 +894,14 @@ async function requestQwenTags(mimeType, base64, prompt) {
 async function requestTags(prepared, prompt) {
   const mimeType = prepared.mimeType || "image/jpeg";
   const base64 = prepared.buffer.toString("base64");
+
+  if (CONFIG.primaryProvider === "qwen") {
+    if (!hasQwenConfigured()) {
+      throw new Error("Qwen provider selected but QWEN_API_KEY is not configured.");
+    }
+    return requestQwenTags(mimeType, base64, prompt);
+  }
+
   const payload = buildPayload(mimeType, base64, prompt);
   let lastQuotaError = null;
 
@@ -944,14 +962,14 @@ async function requestTags(prepared, prompt) {
   }
 
   if (lastQuotaError) {
-    if (hasQwenFallback()) {
+    if (hasQwenConfigured()) {
       log(`[后备切换] Gemini key 已全部耗尽，切换到 ${CONFIG.qwenModel}`);
       return requestQwenTags(mimeType, base64, prompt);
     }
     throw new DailyRequestLimitError(`All configured Gemini API keys exhausted for today. Last error: ${lastQuotaError}`);
   }
 
-  if (hasQwenFallback()) {
+  if (hasQwenConfigured()) {
     log(`[后备切换] 当前没有可用 Gemini key，切换到 ${CONFIG.qwenModel}`);
     return requestQwenTags(mimeType, base64, prompt);
   }
@@ -968,7 +986,7 @@ async function main() {
   ensureConfig();
   loadDailyState();
   log(`=== 开始运行 ${isDryRun ? "[DRY RUN]" : ""} ===`);
-  log(`模型: ${CONFIG.model} | key 数量: ${CONFIG.apiKeys.length} | Qwen 后备: ${hasQwenFallback() ? CONFIG.qwenModel : "disabled"} | 每分钟限制: ${CONFIG.requestsPerMinute} | 每日请求上限: ${CONFIG.dailyRequestCap || "unlimited"}${CONFIG.dailyRequestCapPerKey ? ` | 单 key 上限: ${CONFIG.dailyRequestCapPerKey}` : ""}`);
+  log(`主提供商: ${CONFIG.primaryProvider} | 主模型: ${CONFIG.primaryProvider === "qwen" ? CONFIG.qwenModel : CONFIG.model} | Gemini key 数量: ${CONFIG.apiKeys.length} | Qwen 可用: ${hasQwenConfigured() ? CONFIG.qwenModel : "disabled"} | 每分钟限制: ${CONFIG.requestsPerMinute} | 每日请求上限: ${CONFIG.dailyRequestCap || "unlimited"}${CONFIG.dailyRequestCapPerKey ? ` | 单 key 上限: ${CONFIG.dailyRequestCapPerKey}` : ""}`);
   log(`代理: ${describeProxyConfig()}`);
   log(`今日日期(${CONFIG.timeZone}): ${dailyState.date} | 今日已用请求: ${dailyState.requestCount}`);
 
@@ -1043,7 +1061,7 @@ async function main() {
         saveProgress(progress);
         const stopReason =
           message.includes("All configured Gemini API keys exhausted")
-            ? hasQwenFallback()
+            ? hasQwenConfigured()
               ? "Gemini key 已耗尽且 Qwen 后备不可用"
               : "所有 Gemini key 当日配额已耗尽"
             : message.includes("Daily request cap reached")
