@@ -8,6 +8,7 @@ Automatically tag photos on Synology NAS using Gemini vision models, with option
 - The script tracks API requests by day and can stop automatically at a daily cap
 - The script can rotate across multiple Gemini API keys in order
 - If Gemini keys are exhausted, the script can automatically fall back to `qwen3-vl-flash`
+- The script can honor `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`, so only this process needs to go through your OpenWrt proxy
 - When the daily cap or Gemini quota is reached, the script can wait until the next day and continue from `progress.json`
 - The script can send a daily-limit email through SMTP and optionally fall back to DSM notifications
 - JPEG files are embedded in-place by default instead of relying only on sidecar files
@@ -50,6 +51,22 @@ GEMINI_API_KEYS="<your_keys>" QWEN_API_KEY="<your_qwen_key>" PHOTO_DIR=/volume1/
 GEMINI_API_KEYS="<your_keys>" QWEN_API_KEY="<your_qwen_key>" PHOTO_DIR=/volume1/photo node tagger.js --limit 10
 ```
 
+### Run Only This Process Through OpenWrt
+
+If you want Synology DDNS and external access to keep working, restore the NAS default gateway and DNS to your main router, then launch only `photo tagger` with proxy environment variables:
+
+```bash
+HTTPS_PROXY="http://192.168.1.200:7890" \
+HTTP_PROXY="http://192.168.1.200:7890" \
+NO_PROXY="127.0.0.1,localhost,192.168.1.108,192.168.1.109,192.168.1.200,dashscope.aliyuncs.com" \
+GEMINI_API_KEYS="<your_keys>" \
+QWEN_API_KEY="<your_qwen_key>" \
+PHOTO_DIR=/volume1/photo \
+node tagger.js
+```
+
+If your OpenWrt only exposes SOCKS5, use a matching `ALL_PROXY` value instead.
+
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -60,6 +77,10 @@ GEMINI_API_KEYS="<your_keys>" QWEN_API_KEY="<your_qwen_key>" PHOTO_DIR=/volume1/
 | `QWEN_API_KEY` | empty | Optional Qwen fallback API key |
 | `QWEN_API_ENDPOINT` | `https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions` | Qwen API endpoint |
 | `QWEN_MODEL` | `qwen3-vl-flash` | Qwen fallback model |
+| `HTTP_PROXY` | empty | Optional per-process HTTP proxy |
+| `HTTPS_PROXY` | empty | Optional per-process HTTPS proxy |
+| `ALL_PROXY` | empty | Optional fallback proxy when `HTTP_PROXY` / `HTTPS_PROXY` are not set |
+| `NO_PROXY` | empty | Comma-separated hosts that should bypass the proxy |
 | `REQUESTS_PER_MINUTE` | `15` | Local pacing limit between requests |
 | `DAILY_REQUEST_CAP` | `1500` | Script-level daily request cap |
 | `DAILY_REQUEST_CAP_PER_KEY` | `0` | Optional per-key daily cap, mainly useful for testing key rotation |
@@ -99,6 +120,7 @@ GEMINI_API_KEYS="<your_keys>" QWEN_API_KEY="<your_qwen_key>" PHOTO_DIR=/volume1/
 - If Gemini returns quota exhaustion before the script-level cap is reached, the script also pauses and waits for the next day.
 - When one Gemini key hits quota, the script automatically switches to the next configured key.
 - When all Gemini keys are exhausted, the script can keep going with Qwen if `QWEN_API_KEY` is configured.
+- Proxy settings apply only to this `node tagger.js` process and its outbound API requests; they do not change the NAS system gateway.
 - SMTP is the reliable path for custom daily-progress emails. DSM 7 custom notifications need a valid notification title key and are treated as an optional fallback.
 - `gemini-2.5-flash-lite` is the configured default here because `gemini-2.0-flash` was no longer usable on your current Gemini project. Check current Google AI Studio limits for your project before relying on the `1500` cap.
 - Synology Photos indexing can lag slightly behind metadata writes; `synoindex -a <file>` can help force pickup during verification.

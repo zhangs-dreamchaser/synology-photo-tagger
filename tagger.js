@@ -12,6 +12,7 @@ import fs from "fs";
 import nodemailer from "nodemailer";
 import os from "os";
 import path from "path";
+import { EnvHttpProxyAgent, setGlobalDispatcher } from "undici";
 
 const DEFAULT_PROGRESS_FILE = process.env.PROGRESS_FILE || "./progress.json";
 const DEFAULT_DAILY_STATE_FILE = defaultDailyStateFile(DEFAULT_PROGRESS_FILE);
@@ -78,6 +79,8 @@ const CONFIG = {
   keepJpegSidecar: parseBoolean(process.env.KEEP_JPEG_SIDECAR, false),
   exiv2Bin: process.env.EXIV2_BIN || "exiv2",
 };
+
+const PROXY_CONFIG = applyProxyEnvironment();
 
 const IMAGE_EXTS = new Set([".jpg", ".jpeg", ".png", ".heic", ".webp"]);
 const RAW_EXTS = new Set([".rw2", ".nef", ".arw", ".cr2", ".cr3", ".orf", ".dng"]);
@@ -152,6 +155,45 @@ function getApiKeyLabel(key) {
   if (!key) return "unknown";
   if (key.length <= 10) return key;
   return `${key.slice(0, 6)}...${key.slice(-4)}`;
+}
+
+function applyProxyEnvironment() {
+  const allProxy = process.env.ALL_PROXY || process.env.all_proxy || "";
+  const httpProxy = process.env.HTTP_PROXY || process.env.http_proxy || allProxy;
+  const httpsProxy = process.env.HTTPS_PROXY || process.env.https_proxy || allProxy;
+  const noProxy = process.env.NO_PROXY || process.env.no_proxy || "";
+
+  if (httpProxy) {
+    process.env.HTTP_PROXY = httpProxy;
+  }
+  if (httpsProxy) {
+    process.env.HTTPS_PROXY = httpsProxy;
+  }
+  if (allProxy) {
+    process.env.ALL_PROXY = allProxy;
+  }
+  if (noProxy) {
+    process.env.NO_PROXY = noProxy;
+  }
+
+  const enabled = Boolean(httpProxy || httpsProxy);
+  if (enabled) {
+    setGlobalDispatcher(new EnvHttpProxyAgent());
+  }
+
+  return {
+    enabled,
+    httpProxy,
+    httpsProxy,
+    allProxy,
+    noProxy,
+  };
+}
+
+function describeProxyConfig() {
+  if (!PROXY_CONFIG.enabled) return "disabled";
+  const proxyUrl = PROXY_CONFIG.httpsProxy || PROXY_CONFIG.httpProxy || PROXY_CONFIG.allProxy;
+  return `${proxyUrl}${PROXY_CONFIG.noProxy ? ` | NO_PROXY=${PROXY_CONFIG.noProxy}` : ""}`;
 }
 
 function getDatePartsInTimeZone(date = new Date()) {
@@ -927,6 +969,7 @@ async function main() {
   loadDailyState();
   log(`=== 开始运行 ${isDryRun ? "[DRY RUN]" : ""} ===`);
   log(`模型: ${CONFIG.model} | key 数量: ${CONFIG.apiKeys.length} | Qwen 后备: ${hasQwenFallback() ? CONFIG.qwenModel : "disabled"} | 每分钟限制: ${CONFIG.requestsPerMinute} | 每日请求上限: ${CONFIG.dailyRequestCap || "unlimited"}${CONFIG.dailyRequestCapPerKey ? ` | 单 key 上限: ${CONFIG.dailyRequestCapPerKey}` : ""}`);
+  log(`代理: ${describeProxyConfig()}`);
   log(`今日日期(${CONFIG.timeZone}): ${dailyState.date} | 今日已用请求: ${dailyState.requestCount}`);
 
   const progress = loadProgress();

@@ -11,6 +11,7 @@
   },
   "license": "MIT",
   "dependencies": {
-    "nodemailer": "^6.10.1"
+    "nodemailer": "^6.10.1",
+    "undici": "^7.25.0"
   }
 }
